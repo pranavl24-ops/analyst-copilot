@@ -1,0 +1,16 @@
+# Valuation profile for banks and other financial institutions.
+# Uses an equity-side (excess-returns) model rather than FCFF.
+
+name: financials
+valuation_model: financials
+
+assumptions:
+  forecast_years: 5
+  terminal_growth: 0.025
+  target_capital_ratio: 0.12
+
+comps:
+  multiples:
+    - pb
+    - pe
+    - roe

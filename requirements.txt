@@ -1,0 +1,9 @@
+yfinance
+requests
+pydantic
+pyyaml
+anthropic
+python-dotenv
+matplotlib
+jinja2
+pytest

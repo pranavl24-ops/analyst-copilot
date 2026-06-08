@@ -1,0 +1,17 @@
+# Valuation profile for pharmaceutical / biotech companies.
+# FCFF-based, with R&D-aware assumptions and sector-specific comps.
+
+name: pharma
+valuation_model: fcff
+
+assumptions:
+  forecast_years: 7
+  terminal_growth: 0.03
+  tax_rate: 0.21
+  capitalize_rnd: true
+
+comps:
+  multiples:
+    - ev_ebitda
+    - ev_sales
+    - pe

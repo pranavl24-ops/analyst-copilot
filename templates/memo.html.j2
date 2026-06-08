@@ -1,0 +1,31 @@
+{# Investment memo template. Rendered by memo/render.py. #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>{{ company.name }} — Investment Memo</title>
+</head>
+<body>
+  <h1>{{ company.name }} ({{ company.ticker }})</h1>
+
+  <section id="thesis">
+    <h2>Thesis</h2>
+    {# memo.thesis #}
+  </section>
+
+  <section id="valuation">
+    <h2>Valuation</h2>
+    {# valuation.summary, valuation.per_share #}
+  </section>
+
+  <section id="comps">
+    <h2>Comparables</h2>
+    {# comps.table #}
+  </section>
+
+  <section id="risks">
+    <h2>Risks</h2>
+    {# memo.risks #}
+  </section>
+</body>
+</html>

@@ -1,0 +1,16 @@
+# Valuation profile for industrial / non-financial companies.
+# Drives model selection and default assumptions for the FCFF pipeline.
+
+name: industrial
+valuation_model: fcff
+
+assumptions:
+  forecast_years: 5
+  terminal_growth: 0.025
+  tax_rate: 0.21
+
+comps:
+  multiples:
+    - ev_ebitda
+    - ev_sales
+    - pe
