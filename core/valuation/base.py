@@ -1,26 +1,33 @@
 """Base interface for valuation models.
 
 Defines the common protocol every valuation model implements so they can be
-registered and dispatched uniformly.
+selected by the registry and dispatched uniformly. Each model declares its own
+input type via ``Generic[InputT]`` and returns a concrete result that satisfies
+the ``ValuationResult`` protocol structurally.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Generic, Protocol, TypeVar, runtime_checkable
 
-from core.models import Company
-
-
-class ValuationResult:
-    """The output of a valuation: equity value, per-share value, and assumptions."""
+InputT = TypeVar("InputT")
 
 
-class ValuationModel(ABC):
+@runtime_checkable
+class ValuationResult(Protocol):
+    """The common surface every valuation result exposes."""
+
+    value_per_share: float
+    warnings: list[str]
+
+
+class ValuationModel(ABC, Generic[InputT]):
     """Abstract base class for all valuation models."""
 
     name: str
 
     @abstractmethod
-    def value(self, company: Company) -> ValuationResult:
-        """Estimate the value of a company."""
+    def value(self, inputs: InputT) -> ValuationResult:
+        """Estimate the value of a company from its model-specific inputs."""
         ...
