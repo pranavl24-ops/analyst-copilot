@@ -42,9 +42,14 @@ Python computes every number. The Claude API receives finished figures and write
 prose only. The memo prompt forbids the model from inventing or recomputing anything.
 
 ## Data integrity
-- yfinance for price/market-cap/shares/beta. FMP for statements.
-- data/overrides/<TICKER>.yaml preferred over API when present.
-- API keys from environment variables (.env via python-dotenv). Never hardcode.
+- Source cascade: override > FMP > yfinance fallback > flagged-missing. yfinance is
+  the fallback for Indian (.NS/.BO) statements FMP's plan doesn't cover; it is
+  normalized to the FMP schema and treated as lower-confidence.
+- data/overrides/<TICKER>.yaml is the trust anchor for any name being pitched, and
+  wins field-by-field.
+- Fully-empty periods are dropped; genuinely-missing individual fields surface as
+  MISSING warnings, never zero-filled.
+- API keys come from environment variables (.env via python-dotenv). Never hardcode.
 
 ## Testing
 pytest. Valuation correctness tests must pass after any change to valuation code.
