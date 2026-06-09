@@ -38,6 +38,7 @@ STATEMENT_FIELDS = (
     "change_in_working_capital",
     "tax_expense",
     "pretax_income",
+    "total_equity",
 )
 
 YF_LABELS: dict[str, tuple[str, ...]] = {
@@ -61,6 +62,11 @@ YF_LABELS: dict[str, tuple[str, ...]] = {
     "change_in_working_capital": ("Change In Working Capital",),
     "tax_expense": ("Tax Provision",),
     "pretax_income": ("Pretax Income",),
+    "total_equity": (
+        "Stockholders Equity",
+        "Total Equity Gross Minority Interest",
+        "Common Stock Equity",
+    ),
 }
 
 
@@ -117,6 +123,7 @@ def financial_statements(ticker: str) -> dict[str, Any]:
                 "change_in_working_capital": cfs.get("changeInWorkingCapital"),
                 "tax_expense": inc.get("incomeTaxExpense"),
                 "pretax_income": inc.get("incomeBeforeTax"),
+                "total_equity": bal.get("totalStockholdersEquity") or bal.get("totalEquity"),
             }
         )
 
