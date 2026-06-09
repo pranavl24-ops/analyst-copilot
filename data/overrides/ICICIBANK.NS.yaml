@@ -1,0 +1,73 @@
+# Trust-anchor override for ICICI Bank Ltd (NSE: ICICIBANK).
+# All monetary figures are in INR crore; shares are in crore; price is in INR.
+# Banks are valued by excess return over cost of equity, never FCFF/WACC.
+
+company: ICICI Bank Ltd
+sector: bank
+currency: INR crore
+
+price: 1200.0
+market_cap: 854400.0
+shares: 712.0
+beta: 1.0
+total_debt: 250000.0
+cash: 180000.0
+
+# Annual series used for bank ratios (ROE, book-value growth). For a bank,
+# revenue is total income and ebit is pre-provision operating profit.
+statements:
+  - year: 2021
+    revenue: 90000.0
+    ebit: 30000.0
+    depreciation: 1000.0
+    pretax_income: 25000.0
+    tax_expense: 6000.0
+    total_equity: 150000.0
+  - year: 2022
+    revenue: 100000.0
+    ebit: 35000.0
+    depreciation: 1000.0
+    pretax_income: 30000.0
+    tax_expense: 7500.0
+    total_equity: 175000.0
+  - year: 2023
+    revenue: 115000.0
+    ebit: 45000.0
+    depreciation: 1000.0
+    pretax_income: 42000.0
+    tax_expense: 10500.0
+    total_equity: 200000.0
+  - year: 2024
+    revenue: 140000.0
+    ebit: 58000.0
+    depreciation: 1000.0
+    pretax_income: 55000.0
+    tax_expense: 14000.0
+    total_equity: 225000.0
+  - year: 2025
+    revenue: 160000.0
+    ebit: 64000.0
+    depreciation: 1000.0
+    pretax_income: 60000.0
+    tax_expense: 15000.0
+    total_equity: 250000.0
+
+range_52w: [1000.0, 1350.0]
+
+# Excess-return (residual income) inputs: discount at cost of equity (CAPM).
+valuation:
+  model: bank
+  book_equity_0: 250000.0
+  roe_forecast: [0.185, 0.182, 0.18, 0.178, 0.175]
+  bv_growth_forecast: [0.15, 0.14, 0.13, 0.12, 0.11]
+  cost_of_equity: 0.115
+  terminal_roe: 0.19
+  terminal_growth: 0.07
+  tier1_ratio: 0.16
+
+# Peer-median multiples for the comps cross-check (P/B and P/E, not EV/EBITDA).
+comps:
+  peers: [HDFCBANK.NS, AXISBANK.NS, KOTAKBANK.NS]
+  median_pb: 3.0
+  median_pe: 17.0
+  net_income_latest: 45000.0

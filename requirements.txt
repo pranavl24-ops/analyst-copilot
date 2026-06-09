@@ -6,4 +6,5 @@ anthropic
 python-dotenv
 matplotlib
 jinja2
+playwright
 pytest
