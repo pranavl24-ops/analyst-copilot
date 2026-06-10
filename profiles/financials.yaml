@@ -6,8 +6,13 @@ valuation_model: financials
 
 assumptions:
   forecast_years: 5
-  terminal_growth: 0.025
+  terminal_growth: 0.055
   target_capital_ratio: 0.12
+  rf: 0.07
+  erp: 0.055
+  default_beta: 1.0
+  terminal_roe: 0.15
+  retention_ratio: 0.55
 
 comps:
   multiples:

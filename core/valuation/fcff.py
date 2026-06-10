@@ -7,10 +7,12 @@ protocol.
 """
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any, Optional
 
-from core.models import MarketData, Statements
+from core.valuation import assumptions as macro
 from core.valuation.base import ValuationModel
+
+FCFF_GROWTH_CAP = 0.15
 
 
 @dataclass
@@ -119,6 +121,121 @@ def sensitivity(inp: DCFInputs,
     return grid
 
 
+def _nwc(period: dict[str, Any]) -> Optional[float]:
+    receivables = period.get("receivables")
+    inventory = period.get("inventory")
+    payables = period.get("payables")
+    if receivables is None or inventory is None or payables is None:
+        return None
+    return float(receivables) + float(inventory) - float(payables)
+
+
+def _delta_nwc(period: dict[str, Any], prev: Optional[dict[str, Any]]) -> Optional[float]:
+    """Increase in net working capital (a use of cash), positive when NWC grows.
+
+    The cash-flow ``change_in_working_capital`` line carries the opposite sign (it is
+    the cash impact), so it is negated to match the balance-sheet derivation.
+    """
+    reported = period.get("change_in_working_capital")
+    if reported is not None:
+        return -float(reported)
+    if prev is None:
+        return None
+    current, previous = _nwc(period), _nwc(prev)
+    if current is None or previous is None:
+        return None
+    return current - previous
+
+
+def _historical_fcff(statements: list[dict[str, Any]], tax_rate: float) -> list[float]:
+    fcff: list[float] = []
+    prev: Optional[dict[str, Any]] = None
+    for period in statements:
+        ebit = period.get("ebit")
+        depreciation = period.get("depreciation")
+        capex = period.get("capex")
+        delta_nwc = _delta_nwc(period, prev)
+        prev = period
+        if ebit is None or depreciation is None or capex is None or delta_nwc is None:
+            continue
+        fcff.append(
+            float(ebit) * (1 - tax_rate)
+            + float(depreciation)
+            - abs(float(capex))
+            - delta_nwc
+        )
+    return fcff
+
+
+def _revenue_cagr(statements: list[dict[str, Any]]) -> float:
+    revenues = [
+        float(p["revenue"])
+        for p in statements
+        if p.get("revenue") is not None and float(p["revenue"]) > 0
+    ]
+    if len(revenues) < 2:
+        macro.warn("Fewer than two positive revenue years; forecasting FCFF flat.")
+        return 0.0
+    return (revenues[-1] / revenues[0]) ** (1 / (len(revenues) - 1)) - 1
+
+
+def _forecast_fcff(history: list[float], revenue_cagr: float) -> list[float]:
+    recent = history[-3:]
+    base = sum(recent) / len(recent)
+    growth = min(revenue_cagr, FCFF_GROWTH_CAP)
+    return [base * (1 + growth) ** t for t in range(1, macro.FORECAST_YEARS + 1)]
+
+
+def _wacc(market_data: dict[str, Any], tax_rate: float,
+          profile: dict[str, Any], beta_value: float) -> float:
+    equity = float(market_data["market_cap"])
+    debt = market_data.get("total_debt")
+    debt = float(debt) if debt is not None else 0.0
+    total = equity + debt
+    after_tax_kd = macro.cost_of_debt(profile) * (1 - tax_rate)
+    return (equity / total) * macro.cost_of_equity(beta_value, profile) + (debt / total) * after_tax_kd
+
+
+def build_dcf_inputs(statements: list[dict[str, Any]],
+                     market_data: dict[str, Any],
+                     profile: dict[str, Any]) -> DCFInputs:
+    if market_data.get("market_cap") is None:
+        raise ValueError("market_cap is required to weight the WACC and bridge to equity; none was available.")
+    if market_data.get("shares") is None:
+        raise ValueError("shares_outstanding is required for a per-share value; none was available.")
+
+    tax_rate = macro.effective_tax_rate(statements, profile)
+    history = _historical_fcff(statements, tax_rate)
+    if len(history) < 2:
+        raise ValueError(
+            "Need at least two years of computable FCFF; each needs EBIT, depreciation, "
+            "capex, and a working-capital change (change_in_working_capital, or "
+            "receivables/inventory/payables for a year-over-year delta)."
+        )
+
+    forecast = _forecast_fcff(history, _revenue_cagr(statements))
+    beta_value = macro.beta_for_ticker(market_data.get("ticker"), market_data, profile)
+
+    debt = market_data.get("total_debt")
+    cash = market_data.get("cash")
+    if debt is None:
+        macro.warn("total_debt unavailable; treating as 0 in net debt.")
+    if cash is None:
+        macro.warn("cash unavailable; treating as 0 in net debt.")
+    net_debt = (float(debt) if debt is not None else 0.0) - (float(cash) if cash is not None else 0.0)
+
+    minority = float(macro.profile_assumptions(profile).get("minority_interest", 0.0))
+
+    return DCFInputs(
+        fcff_forecast=forecast,
+        wacc=_wacc(market_data, tax_rate, profile, beta_value),
+        terminal_growth=macro.terminal_growth(profile),
+        net_debt=net_debt,
+        shares_outstanding=float(market_data["shares"]),
+        minority_interest=minority,
+    )
+
+
 class StandardFCFF(ValuationModel[DCFInputs]):
     """FCFF DCF for industrials, consumer, pharma, and IT names."""
 
@@ -127,6 +244,6 @@ class StandardFCFF(ValuationModel[DCFInputs]):
     def value(self, inputs: DCFInputs) -> DCFResult:
         return run_dcf(inputs)
 
-    def from_statements(self, statements: Statements,
-                        market_data: MarketData, profile: dict) -> DCFInputs:
-        raise NotImplementedError("Company/MarketData -> DCFInputs wiring is a later step.")
+    def from_statements(self, statements: list[dict[str, Any]],
+                        market_data: dict[str, Any], profile: dict[str, Any]) -> DCFInputs:
+        return build_dcf_inputs(statements, market_data, profile)

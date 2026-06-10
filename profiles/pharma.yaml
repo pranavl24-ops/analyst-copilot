@@ -6,9 +6,13 @@ valuation_model: fcff
 
 assumptions:
   forecast_years: 7
-  terminal_growth: 0.03
+  terminal_growth: 0.055
   tax_rate: 0.21
   capitalize_rnd: true
+  rf: 0.07
+  erp: 0.055
+  default_beta: 1.0
+  cost_of_debt: 0.08
 
 comps:
   multiples:

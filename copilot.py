@@ -21,18 +21,28 @@ import statistics
 from pathlib import Path
 from typing import Any, Optional
 
+import yaml
+
 from core.comps import CompsResult, PeerMultiples
 from core.models import Statements
 from core.ratios import compute_ratios
 from core.validate import sanity_checks
-from core.valuation.fcff import DCFInputs, run_dcf, sensitivity
+from core.valuation import assumptions as macro
+from core.valuation.fcff import (
+    DCFInputs,
+    _historical_fcff,
+    _revenue_cagr,
+    run_dcf,
+    sensitivity,
+)
 from core.valuation.financials import BankInputs, run_bank_excess_return
 from core.valuation.registry import NotSupported, pick_model
-from data.fetch import load_override
+from data.fetch import MARKET_FIELDS, STATEMENT_FIELDS, DataError, load_override, merged
 from memo.prompt import build_payload, generate_memo
 from memo.render import football_field, render_pdf
 
 OUT_ROOT = Path("out")
+PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -53,23 +63,25 @@ def build_parser() -> argparse.ArgumentParser:
 def run(ticker: str, model: Optional[str] = None) -> int:
     """Run the full analysis pipeline for a ticker and return an exit code."""
     data = load_override(ticker)
-    if data is None:
-        print(
-            f"No override at data/overrides/{ticker}.yaml. Valuation-from-statements "
-            f"wiring is deferred, so a trust-anchor override is required to value {ticker}."
-        )
-        return 1
-    if "valuation" not in data:
-        print(f"Override for {ticker} has no 'valuation' block; cannot value it.")
-        return 1
-
-    sector = str(data.get("sector", ""))
+    sector = str((data or {}).get("sector", ""))
     try:
         model_cls = pick_model(sector, model)
     except NotSupported as error:
         print(f"Refusing to value {ticker}: {error}")
         return 2
 
+    if data is not None and "valuation" in data:
+        return _run_from_override(ticker, data, model_cls, sector)
+
+    if data is None:
+        print(f"[{ticker}] no override found; valuing from pulled statements.")
+    else:
+        print(f"[{ticker}] override has no 'valuation' block; valuing from pulled statements.")
+    return _run_from_statements(ticker, model_cls, sector)
+
+
+def _run_from_override(ticker: str, data: dict[str, Any],
+                       model_cls: type, sector: str) -> int:
     model_name = model_cls.name
     vblock = data["valuation"]
     declared = str(vblock.get("model", model_name))
@@ -80,7 +92,7 @@ def run(ticker: str, model: Optional[str] = None) -> int:
         )
         return 1
 
-    print(f"[{ticker}] model={model_name} sector={sector or '—'}")
+    print(f"[{ticker}] model={model_name} sector={sector or '—'} (override valuation block)")
     if model_name == "bank":
         payload, chart_methods = _value_bank(ticker, data)
     else:
@@ -101,6 +113,56 @@ def run(ticker: str, model: Optional[str] = None) -> int:
         f"{payload['current_price']:,.2f} ({payload['upside_pct']:+.1f}%)"
     )
     print(f"[{ticker}] wrote {outdir}/memo.pdf, memo.md, payload.json, football_field.png")
+    return 0
+
+
+def _load_profile(sector: str) -> dict[str, Any]:
+    name = _profile_name_for_sector(sector)
+    path = PROFILES_DIR / f"{name}.yaml"
+    with path.open() as handle:
+        return yaml.safe_load(handle) or {}
+
+
+def _profile_name_for_sector(sector: str) -> str:
+    normalized = sector.strip().lower()
+    if any(key in normalized for key in ("bank", "nbfc", "financial")):
+        return "financials"
+    if "pharma" in normalized:
+        return "pharma"
+    return "industrial"
+
+
+def _run_from_statements(ticker: str, model_cls: type, sector: str) -> int:
+    try:
+        pulled = merged(ticker)
+    except DataError as error:
+        print(f"Could not pull data for {ticker}: {error}")
+        return 1
+
+    statements = pulled.get("statements")
+    if not statements:
+        print(f"No statements could be pulled for {ticker}; cannot value from statements.")
+        return 1
+
+    market = {field: pulled.get(field) for field in MARKET_FIELDS}
+    market["ticker"] = ticker
+    profile = _load_profile(sector)
+    model = model_cls()
+
+    print(f"[{ticker}] model={model.name} sector={sector or '—'} (from-statements projection)")
+    _print_pulled(pulled, market)
+
+    try:
+        inputs = model.from_statements(statements, market, profile)
+        result = model.value(inputs)
+    except (ValueError, KeyError) as error:
+        print(f"Cannot value {ticker} from statements: {error}")
+        return 1
+
+    if model.name == "bank":
+        _report_bank(market, profile, inputs, result)
+    else:
+        _report_fcff(statements, market, profile, inputs, result)
     return 0
 
 
@@ -335,6 +397,79 @@ def _range_from_grid(grid: dict[tuple[float, float], Optional[float]]) -> tuple[
 def _range_52w(data: dict[str, Any]) -> tuple[float, float]:
     low, high = data["range_52w"]
     return float(low), float(high)
+
+
+def _fmt(value: Any) -> str:
+    if value is None:
+        return "MISSING"
+    if isinstance(value, float):
+        return f"{value:,.2f}"
+    return f"{value:,}" if isinstance(value, int) else str(value)
+
+
+def _print_pulled(pulled: dict[str, Any], market: dict[str, Any]) -> None:
+    sources = pulled.get("_sources", {})
+    print("  pulled market data:")
+    for field in MARKET_FIELDS:
+        print(f"    {field:<12} {_fmt(market[field]):>20}   [{sources.get(field, '—')}]")
+    print(f"  pulled statements [{sources.get('statements', '—')}]:")
+    for period in pulled["statements"]:
+        print(f"    --- FY{period.get('year', '?')} ---")
+        for field in STATEMENT_FIELDS:
+            print(f"      {field:<26} {_fmt(period.get(field))}")
+
+
+def _report_fcff(statements: list[dict[str, Any]], market: dict[str, Any],
+                 profile: dict[str, Any], inputs: DCFInputs, result: Any) -> None:
+    tax_rate = macro.effective_tax_rate(statements, profile)
+    history = _historical_fcff(statements, tax_rate)
+    print("  derived FCFF inputs:")
+    print(f"    effective tax rate        {tax_rate:.2%}")
+    print(f"    revenue CAGR              {_revenue_cagr(statements):.2%} (FCFF growth capped at 15%)")
+    print(f"    historical FCFF           [{', '.join(f'{x:,.0f}' for x in history)}]")
+    print(f"    FCFF forecast (5y)        [{', '.join(f'{x:,.0f}' for x in inputs.fcff_forecast)}]")
+    beta_value = macro.beta_for_ticker(market.get("ticker"), market, profile)
+    print(f"    cost of equity (CAPM)     {macro.cost_of_equity(beta_value, profile):.2%} "
+          f"(beta {beta_value:.2f} vs ^NSEI)")
+    print(f"    WACC                      {inputs.wacc:.2%}")
+    print(f"    terminal growth           {inputs.terminal_growth:.2%}")
+    print(f"    net debt                  {inputs.net_debt:,.0f}")
+    print(f"    diluted shares            {inputs.shares_outstanding:,.0f}")
+    print("  valuation:")
+    print(f"    enterprise value          {result.enterprise_value:,.0f}")
+    print(f"    equity value              {result.equity_value:,.0f}")
+    print(f"    terminal value % of EV    {result.tv_pct_of_ev:.0%}")
+    for warning in result.warnings:
+        print(f"    warning: {warning}")
+    _print_value(market, result.value_per_share)
+
+
+def _report_bank(market: dict[str, Any], profile: dict[str, Any],
+                 inputs: BankInputs, result: Any) -> None:
+    print("  derived bank inputs:")
+    print(f"    book equity (opening)     {inputs.book_equity_0:,.0f}")
+    print(f"    ROE forecast (5y)         [{', '.join(f'{x:.1%}' for x in inputs.roe_forecast)}]")
+    print(f"    BV growth forecast (5y)   [{', '.join(f'{x:.1%}' for x in inputs.bv_growth_forecast)}]")
+    beta_value = macro.beta_for_ticker(market.get("ticker"), market, profile)
+    print(f"    cost of equity (CAPM)     {inputs.cost_of_equity:.2%} (beta {beta_value:.2f} vs ^NSEI)")
+    print(f"    terminal ROE              {inputs.terminal_roe:.2%}")
+    print(f"    terminal growth           {inputs.terminal_growth:.2%}")
+    print(f"    diluted shares            {inputs.shares_outstanding:,.0f}")
+    print("  valuation:")
+    print(f"    equity value              {result.equity_value:,.0f}")
+    print(f"    implied P/B               {result.implied_pb:.2f}x")
+    for warning in result.warnings:
+        print(f"    warning: {warning}")
+    _print_value(market, result.value_per_share)
+
+
+def _print_value(market: dict[str, Any], value_per_share: float) -> None:
+    price = market.get("price")
+    if price is None:
+        print(f"  => value/share {value_per_share:,.2f} (no market price to compare)")
+        return
+    upside = (value_per_share - float(price)) / float(price) * 100
+    print(f"  => value/share {value_per_share:,.2f} vs price {float(price):,.2f} ({upside:+.1f}%)")
 
 
 def main(argv: list[str] | None = None) -> int:
