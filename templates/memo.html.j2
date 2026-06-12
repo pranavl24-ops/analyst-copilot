@@ -1,49 +1,283 @@
-{# One-page investment memo. Filled by memo/render.py and printed to PDF. #}
+{# One-page equity-research note. Filled by memo/render.py and printed to PDF. #}
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>{{ title }}</title>
+  <title>{{ company }} — Investment Note</title>
   <style>
-    @page { size: A4; margin: 0; }
+    :root {
+      --navy: #14243d;
+      --ink: #1f2733;
+      --muted: #6b7685;
+      --line: #d9dee6;
+      --panel: #f6f8fa;
+      --accent: #2f5d8a;
+      --buy: #1f7a4d;
+      --hold: #b7791f;
+      --sell: #b3322c;
+    }
     * { box-sizing: border-box; }
+    html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
     body {
-      font-family: "Helvetica Neue", Arial, sans-serif;
-      color: #1a1a1a;
-      font-size: 10.5px;
-      line-height: 1.45;
+      font-family: "Georgia", "Times New Roman", serif;
+      color: var(--ink);
+      font-size: 9.5px;
+      line-height: 1.5;
       margin: 0;
     }
-    .page { padding: 4mm 2mm; }
-    .chart { text-align: center; margin-bottom: 6px; }
-    .chart img { max-width: 100%; height: auto; }
-    h1 { font-size: 17px; margin: 0 0 2px; border-bottom: 2px solid #1a1a1a; padding-bottom: 3px; }
-    h2 { font-size: 12px; margin: 10px 0 3px; color: #2a3f5f; }
-    p { margin: 3px 0; }
-    ul { margin: 3px 0 3px 0; padding-left: 18px; }
-    li { margin: 1px 0; }
-    blockquote {
-      margin: 0 0 8px;
-      padding: 5px 9px;
-      background: #f4f1ea;
-      border-left: 3px solid #b7791f;
-      font-size: 9px;
-      color: #5a4a2a;
+    .sans { font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif; }
+
+    .header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      border-bottom: 2px solid var(--navy);
+      padding-bottom: 7px;
     }
-    strong { color: #111; }
-    .body { columns: 2; column-gap: 14px; }
-    .body h1 { column-span: all; }
-    .body blockquote { column-span: all; }
+    .company {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 22px;
+      font-weight: 700;
+      color: var(--navy);
+      letter-spacing: -0.2px;
+      line-height: 1.1;
+    }
+    .subline {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 9.5px;
+      color: var(--muted);
+      margin-top: 3px;
+      letter-spacing: 0.4px;
+      text-transform: uppercase;
+    }
+    .badge {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      color: #fff;
+      padding: 6px 14px;
+      border-radius: 3px;
+      white-space: nowrap;
+    }
+    .badge.BUY { background: var(--buy); }
+    .badge.HOLD { background: var(--hold); }
+    .badge.SELL { background: var(--sell); }
+
+    .stat-row {
+      display: flex;
+      gap: 8px;
+      margin: 9px 0 4px;
+    }
+    .stat {
+      flex: 1;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 6px 9px;
+      break-inside: avoid;
+    }
+    .stat .k {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 7.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--muted);
+    }
+    .stat .v {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 14px;
+      font-weight: 700;
+      color: var(--navy);
+      margin-top: 1px;
+    }
+    .stat .v.method { font-size: 11px; }
+    .stat .v.pos { color: var(--buy); }
+    .stat .v.neg { color: var(--sell); }
+
+    .chart {
+      text-align: center;
+      margin: 8px 0;
+      break-inside: avoid;
+    }
+    .chart img { max-width: 100%; max-height: 235px; height: auto; }
+
+    .panels { display: flex; gap: 10px; align-items: stretch; margin-bottom: 8px; }
+
+    .card {
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 8px 11px;
+      break-inside: avoid;
+    }
+    .card.summary { flex: 1.15; }
+    .card.metrics-wrap { flex: 1; border: none; padding: 0; }
+    .card-title {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--accent);
+      margin-bottom: 5px;
+    }
+    table.summary-tbl { width: 100%; border-collapse: collapse; }
+    table.summary-tbl td {
+      padding: 2.5px 0;
+      border-bottom: 1px dotted var(--line);
+    }
+    table.summary-tbl td.lbl { color: var(--muted); }
+    table.summary-tbl td.val {
+      text-align: right;
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-weight: 700;
+      color: var(--ink);
+    }
+    table.summary-tbl tr:last-child td { border-bottom: none; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      background: var(--panel);
+      padding: 6px 8px;
+      break-inside: avoid;
+    }
+    .metric .k {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 7.5px;
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      color: var(--muted);
+    }
+    .metric .v {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--navy);
+      margin-top: 1px;
+    }
+
+    .prose { columns: 2; column-gap: 16px; }
+    .prose section { break-inside: avoid; margin-bottom: 7px; }
+    .prose h3 {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--navy);
+      margin: 0 0 2px;
+      padding-bottom: 1px;
+      border-bottom: 1px solid var(--line);
+    }
+    .prose p { margin: 2px 0; }
+    .prose ul { margin: 2px 0; padding-left: 14px; }
+    .prose li { margin: 1px 0; }
+    .prose strong { color: var(--navy); }
+
+    .risks {
+      break-inside: avoid;
+      margin-top: 9px;
+      border: 1px solid #e6c9b0;
+      border-left: 4px solid var(--sell);
+      background: #fcf4ef;
+      border-radius: 4px;
+      padding: 8px 12px;
+    }
+    .risks .card-title { color: var(--sell); }
+    .risks ul { margin: 2px 0; padding-left: 15px; }
+    .risks li { margin: 1.5px 0; }
+    .risks p { margin: 2px 0; }
+
+    .offline-tag {
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 7px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--muted);
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 1px 6px;
+      margin-left: 8px;
+      vertical-align: middle;
+    }
+
+    .footer {
+      margin-top: 11px;
+      border-top: 1px solid var(--line);
+      padding-top: 5px;
+      font-family: system-ui, "Inter", "Helvetica Neue", Arial, sans-serif;
+      font-size: 7.5px;
+      color: var(--muted);
+      line-height: 1.4;
+    }
+    .footer .disclaimer { font-weight: 700; color: var(--ink); }
   </style>
 </head>
 <body>
-  <div class="page">
-    <div class="chart">
-      <img src="{{ chart_data_uri }}" alt="Valuation football field" />
+  <div class="header">
+    <div>
+      <div class="company">{{ company }}{% if offline %}<span class="offline-tag">Offline render</span>{% endif %}</div>
+      <div class="subline">{{ ticker }} · {{ exchange }} · {{ as_of_date }}</div>
     </div>
-    <div class="body">
-      {{ body_html | safe }}
+    <div class="badge {{ recommendation }}">{{ recommendation }}</div>
+  </div>
+
+  <div class="stat-row">
+    {% for stat in stats %}
+    <div class="stat">
+      <div class="k">{{ stat.label }}</div>
+      <div class="v {{ 'method' if stat.label == 'Valuation Method' else '' }} {{ stat.tone or '' }}">{{ stat.value }}</div>
     </div>
+    {% endfor %}
+  </div>
+
+  <div class="chart">
+    <img src="{{ chart_data_uri }}" alt="Valuation football field" />
+  </div>
+
+  <div class="panels">
+    <div class="card summary">
+      <div class="card-title">Valuation Summary</div>
+      <table class="summary-tbl">
+        {% for row in summary_rows %}
+        <tr><td class="lbl">{{ row.label }}</td><td class="val">{{ row.value }}</td></tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div class="card metrics-wrap">
+      <div class="card-title">Key Metrics</div>
+      <div class="metric-grid">
+        {% for card in metric_cards %}
+        <div class="metric">
+          <div class="k">{{ card.label }}</div>
+          <div class="v">{{ card.value }}</div>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <div class="prose">
+    {% for section in sections %}
+    <section>
+      <h3>{{ section.title }}</h3>
+      {{ section.body_html | safe }}
+    </section>
+    {% endfor %}
+  </div>
+
+  <div class="risks">
+    <div class="card-title">Risks &amp; Model Caveats</div>
+    {{ risks_html | safe }}
+  </div>
+
+  <div class="footer">
+    <div class="disclaimer">For educational purposes only; not investment advice.</div>
+    <div>{{ footer_note }}</div>
+    <div>Generated by Analyst Co-pilot.</div>
   </div>
 </body>
 </html>

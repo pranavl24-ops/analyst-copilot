@@ -1,7 +1,17 @@
 import pytest
 
 from core.valuation import assumptions as macro
-from core.valuation.fcff import StandardFCFF, build_dcf_inputs, run_dcf
+from core.valuation.fcff import (
+    DCFInputs,
+    StandardFCFF,
+    _capex_pct_schedule,
+    _faded_revenue_forecast,
+    _forecast_fcff,
+    _historical_fcff,
+    _revenue_cagr,
+    build_dcf_inputs,
+    run_dcf,
+)
 from core.valuation.financials import BankExcessReturn
 
 
@@ -53,13 +63,58 @@ def test_tax_rate_is_clamped_and_averaged():
     assert forecast[-1] > forecast[0]
 
 
-def test_fcff_growth_capped_at_15_percent():
-    statements = _statements()
-    for i, period in enumerate(statements):
-        period["revenue"] = 1000.0 * (3.0 ** i)
-    inputs = build_dcf_inputs(statements, _market(), {})
-    ratio = inputs.fcff_forecast[1] / inputs.fcff_forecast[0]
-    assert ratio == pytest.approx(1.15, abs=1e-9)
+def test_revenue_growth_capped_at_15_percent():
+    revenues = _faded_revenue_forecast(
+        latest_revenue=1000.0, revenue_cagr=2.0, terminal_growth=0.055, years=5
+    )
+    assert revenues[0] / 1000.0 == pytest.approx(1.15, abs=1e-9)
+
+
+def test_revenue_growth_fades_to_terminal_in_final_year():
+    revenues = _faded_revenue_forecast(
+        latest_revenue=1000.0, revenue_cagr=0.12, terminal_growth=0.05, years=5
+    )
+    assert revenues[-1] / revenues[-2] == pytest.approx(1.05, abs=1e-9)
+
+
+def test_capex_pct_tapers_toward_dep_ratio():
+    dep_ratio = 0.04
+    schedule = _capex_pct_schedule(capex_pct_latest=0.10, dep_ratio=dep_ratio, years=5)
+    assert schedule[0] == pytest.approx(0.10)
+    assert all(later <= earlier for earlier, later in zip(schedule, schedule[1:]))
+    assert schedule[-1] == pytest.approx(dep_ratio)
+    assert all(pct >= dep_ratio for pct in schedule)
+
+
+def _naive_grow_the_average(statements, tax_rate, growth):
+    history = _historical_fcff(statements, tax_rate)
+    base = sum(history[-3:]) / len(history[-3:])
+    return [base * (1 + growth) ** t for t in range(1, macro.FORECAST_YEARS + 1)]
+
+
+def test_heavy_capex_company_worth_more_under_component_method():
+    statements = []
+    revenue = 100000.0
+    for year in range(2021, 2026):
+        statements.append({
+            "year": year, "revenue": revenue,
+            "ebit": revenue * 0.18, "depreciation": revenue * 0.05,
+            "capex": -revenue * 0.20,
+            "receivables": revenue * 0.12, "inventory": revenue * 0.15, "payables": revenue * 0.10,
+            "tax_expense": revenue * 0.18 * 0.25, "pretax_income": revenue * 0.18,
+        })
+        revenue *= 1.10
+
+    tax_rate = macro.effective_tax_rate(statements, {})
+    growth = min(_revenue_cagr(statements), 0.15)
+
+    component = _forecast_fcff(statements, tax_rate, terminal_growth=0.055)
+    naive = _naive_grow_the_average(statements, tax_rate, growth)
+
+    common = dict(wacc=0.11, terminal_growth=0.055, net_debt=0.0, shares_outstanding=1000.0)
+    component_value = run_dcf(DCFInputs(fcff_forecast=component, **common)).value_per_share
+    naive_value = run_dcf(DCFInputs(fcff_forecast=naive, **common)).value_per_share
+    assert component_value > naive_value
 
 
 def test_delta_nwc_derived_when_cashflow_line_absent():

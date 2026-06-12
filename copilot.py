@@ -41,6 +41,7 @@ from core.valuation.financials import BankInputs, run_bank_excess_return
 from core.valuation.plausibility import (
     book_equity_distortion_warnings,
     extreme_gap_warnings,
+    sum_of_the_parts_warnings,
     unstable_fcff_warnings,
 )
 from core.valuation.registry import NotSupported, pick_model
@@ -108,7 +109,7 @@ def _emit(ticker: str, payload: dict[str, Any],
     (outdir / "memo.md").write_text(memo_markdown)
 
     chart = football_field(chart_methods, payload["current_price"], outdir / "football_field.png")
-    render_pdf(memo_markdown, chart, outdir / "memo.pdf")
+    render_pdf(memo_markdown, payload, chart, outdir / "memo.pdf")
 
     print(
         f"[{ticker}] value/share {payload['value_per_share']:,.2f} vs price "
@@ -219,6 +220,12 @@ def _payload_fcff_from_statements(
     price = float(market["price"])
     grid = sensitivity(inputs)
     flags = unstable_fcff_warnings(history)
+    flags += sum_of_the_parts_warnings(
+        history,
+        [float(p["capex"]) for p in statements],
+        [float(p["depreciation"]) for p in statements],
+        [float(p["revenue"]) for p in statements],
+    )
     flags += extreme_gap_warnings(result.value_per_share, price)
     ratios = _ratios_or_warning(pulled, flags)
 
@@ -336,8 +343,15 @@ def _value_fcff(ticker: str, data: dict[str, Any]) -> tuple[dict[str, Any], dict
     ratios = compute_ratios(data)
     comps = _fcff_comps(data, net_debt, shares)
 
-    history = _historical_fcff(data["statements"], _latest_tax_rate(data["statements"]))
+    periods = data["statements"]
+    history = _historical_fcff(periods, _latest_tax_rate(periods))
     flags += unstable_fcff_warnings(history)
+    flags += sum_of_the_parts_warnings(
+        history,
+        [float(p["capex"]) for p in periods],
+        [float(p["depreciation"]) for p in periods],
+        [float(p["revenue"]) for p in periods],
+    )
     flags += extreme_gap_warnings(result.value_per_share, float(data["price"]))
 
     cblock = data["comps"]

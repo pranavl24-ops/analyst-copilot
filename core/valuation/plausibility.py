@@ -16,6 +16,7 @@ from typing import Optional, Sequence
 EXTREME_GAP_THRESHOLD = 0.35
 FCFF_CV_THRESHOLD = 0.5
 EQUITY_JUMP_THRESHOLD = 0.40
+CAPEX_TO_DEP_THRESHOLD = 1.5
 
 
 def extreme_gap_warnings(value_per_share: float, current_price: float) -> list[str]:
@@ -36,21 +37,41 @@ def extreme_gap_warnings(value_per_share: float, current_price: float) -> list[s
 
 
 def unstable_fcff_warnings(historical_fcff: Sequence[float]) -> list[str]:
-    """Flag an FCFF base too unstable to grow off its average (FCFF path)."""
-    if len(historical_fcff) < 2:
-        return []
-    reasons: list[str] = []
-    if any(value < 0 for value in historical_fcff):
-        reasons.append("at least one historical FCFF year is negative")
-    cv = _coefficient_of_variation(historical_fcff)
-    if cv is not None and cv > FCFF_CV_THRESHOLD:
-        reasons.append(f"the coefficient of variation of historical FCFF is {cv:.0%} (>50%)")
+    """Flag an FCFF base too unstable to forecast reliably (FCFF path)."""
+    reasons = _unstable_fcff_reasons(historical_fcff)
     if not reasons:
         return []
     return [
-        "Unreliable FCFF base: " + " and ".join(reasons) + ". The grow-off-average "
-        "forecast is unstable and likely unreliable — typical of heavy-capex names — "
-        "so the DCF output should be treated with caution."
+        "Unreliable FCFF base: " + " and ".join(reasons) + ". The historical FCFF "
+        "base is volatile or negative (heavy investment-phase capex), so even the "
+        "component forecast's normalized inputs carry elevated uncertainty — treat "
+        "the output with caution."
+    ]
+
+
+def sum_of_the_parts_warnings(
+    historical_fcff: Sequence[float],
+    capex_series: Sequence[float],
+    depreciation_series: Sequence[float],
+    revenue_series: Sequence[float],
+) -> list[str]:
+    """Flag a heavy-capex / likely multi-segment name a single-stage DCF can't capture.
+
+    Tied to company characteristics, never the price gap: it fires when the median
+    capex/revenue ratio across the window runs well above maintenance (>1.5x the
+    median depreciation/revenue ratio) or when the historical FCFF base is itself
+    unstable. The median makes it a structural signal rather than a one-year spike.
+    """
+    if not (
+        _heavy_investment_phase(capex_series, depreciation_series, revenue_series)
+        or _unstable_fcff_reasons(historical_fcff)
+    ):
+        return []
+    return [
+        "Heavy-capex / likely multi-segment business: capex runs well above "
+        "maintenance levels, the signature of a conglomerate or investment-phase "
+        "name. A single-stage DCF is a simplification here; a sum-of-the-parts "
+        "valuation that prices each segment separately would be more appropriate."
     ]
 
 
@@ -68,6 +89,43 @@ def book_equity_distortion_warnings(total_equity_series: Sequence[float]) -> lis
                 f"so the result needs a normalized-ROE override before it can be trusted."
             )
     return warnings
+
+
+def _unstable_fcff_reasons(historical_fcff: Sequence[float]) -> list[str]:
+    if len(historical_fcff) < 2:
+        return []
+    reasons: list[str] = []
+    if any(value < 0 for value in historical_fcff):
+        reasons.append("at least one historical FCFF year is negative")
+    cv = _coefficient_of_variation(historical_fcff)
+    if cv is not None and cv > FCFF_CV_THRESHOLD:
+        reasons.append(f"the coefficient of variation of historical FCFF is {cv:.0%} (>50%)")
+    return reasons
+
+
+def _heavy_investment_phase(
+    capex_series: Sequence[float],
+    depreciation_series: Sequence[float],
+    revenue_series: Sequence[float],
+) -> bool:
+    capex_to_revenue = _median_ratio(capex_series, revenue_series)
+    depreciation_to_revenue = _median_ratio(depreciation_series, revenue_series)
+    if capex_to_revenue is None or depreciation_to_revenue is None:
+        return False
+    return capex_to_revenue > CAPEX_TO_DEP_THRESHOLD * depreciation_to_revenue
+
+
+def _median_ratio(
+    numerators: Sequence[float], denominators: Sequence[float]
+) -> Optional[float]:
+    ratios = [
+        abs(numerator) / denominator
+        for numerator, denominator in zip(numerators, denominators)
+        if denominator > 0
+    ]
+    if not ratios:
+        return None
+    return statistics.median(ratios)
 
 
 def _coefficient_of_variation(values: Sequence[float]) -> Optional[float]:

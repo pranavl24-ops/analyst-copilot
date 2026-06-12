@@ -167,23 +167,110 @@ def _historical_fcff(statements: list[dict[str, Any]], tax_rate: float) -> list[
     return fcff
 
 
-def _revenue_cagr(statements: list[dict[str, Any]]) -> float:
-    revenues = [
+def _positive_revenues(statements: list[dict[str, Any]]) -> list[float]:
+    return [
         float(p["revenue"])
         for p in statements
         if p.get("revenue") is not None and float(p["revenue"]) > 0
     ]
+
+
+def _revenue_cagr(statements: list[dict[str, Any]]) -> float:
+    revenues = _positive_revenues(statements)
     if len(revenues) < 2:
         macro.warn("Fewer than two positive revenue years; forecasting FCFF flat.")
         return 0.0
     return (revenues[-1] / revenues[0]) ** (1 / (len(revenues) - 1)) - 1
 
 
-def _forecast_fcff(history: list[float], revenue_cagr: float) -> list[float]:
-    recent = history[-3:]
-    base = sum(recent) / len(recent)
-    growth = min(revenue_cagr, FCFF_GROWTH_CAP)
-    return [base * (1 + growth) ** t for t in range(1, macro.FORECAST_YEARS + 1)]
+def _last_n_mean(values: list[float], n: int = 3) -> float:
+    recent = values[-n:]
+    return sum(recent) / len(recent)
+
+
+def _ratio_to_revenue(statements: list[dict[str, Any]], key: str, absolute: bool = False) -> list[float]:
+    ratios: list[float] = []
+    for period in statements:
+        revenue = period.get("revenue")
+        value = period.get(key)
+        if revenue is None or value is None or float(revenue) <= 0:
+            continue
+        numerator = abs(float(value)) if absolute else float(value)
+        ratios.append(numerator / float(revenue))
+    return ratios
+
+
+def _nwc_intensity(statements: list[dict[str, Any]]) -> float:
+    """Mean of [YoY change in net working capital] / [YoY change in revenue].
+
+    Clamped to [0, 0.25]; defaults to 0.05 when it cannot be computed from at least
+    one usable year-over-year pair.
+    """
+    ratios: list[float] = []
+    prev: Optional[dict[str, Any]] = None
+    for period in statements:
+        if prev is not None:
+            nwc, prev_nwc = _nwc(period), _nwc(prev)
+            revenue, prev_revenue = period.get("revenue"), prev.get("revenue")
+            if nwc is not None and prev_nwc is not None and revenue is not None and prev_revenue is not None:
+                delta_revenue = float(revenue) - float(prev_revenue)
+                if delta_revenue != 0:
+                    ratios.append((nwc - prev_nwc) / delta_revenue)
+        prev = period
+    if not ratios:
+        return 0.05
+    return min(max(sum(ratios) / len(ratios), 0.0), 0.25)
+
+
+def _faded_revenue_forecast(latest_revenue: float, revenue_cagr: float,
+                            terminal_growth: float, years: int) -> list[float]:
+    """Compound the latest revenue at a rate fading linearly from the (capped) CAGR
+    in year 1 to ``terminal_growth`` in the final year."""
+    capped = min(revenue_cagr, FCFF_GROWTH_CAP)
+    revenues: list[float] = []
+    prev = latest_revenue
+    for t in range(1, years + 1):
+        growth = capped + (terminal_growth - capped) * (t - 1) / (years - 1)
+        prev = prev * (1 + growth)
+        revenues.append(prev)
+    return revenues
+
+
+def _capex_pct_schedule(capex_pct_latest: float, dep_ratio: float, years: int) -> list[float]:
+    """Capex/revenue tapering linearly from the latest actual ratio toward the
+    depreciation ratio (maintenance capex), never falling below it."""
+    return [
+        max(capex_pct_latest + (dep_ratio - capex_pct_latest) * (t - 1) / (years - 1), dep_ratio)
+        for t in range(1, years + 1)
+    ]
+
+
+def _forecast_fcff(statements: list[dict[str, Any]], tax_rate: float,
+                   terminal_growth: float) -> list[float]:
+    """Component forecast: project revenue, then EBIT, NOPAT, depreciation, capex,
+    and the working-capital draw separately, so a depressed or volatile historical
+    FCFF base never anchors the forecast and capex converges to maintenance levels."""
+    years = macro.FORECAST_YEARS
+    latest_revenue = _positive_revenues(statements)[-1]
+
+    target_ebit_margin = _last_n_mean(_ratio_to_revenue(statements, "ebit"))
+    dep_ratio = _last_n_mean(_ratio_to_revenue(statements, "depreciation"))
+    capex_pct_latest = _ratio_to_revenue(statements, "capex", absolute=True)[-1]
+    nwc_intensity = _nwc_intensity(statements)
+
+    revenues = _faded_revenue_forecast(latest_revenue, _revenue_cagr(statements), terminal_growth, years)
+    capex_pcts = _capex_pct_schedule(capex_pct_latest, dep_ratio, years)
+
+    forecast: list[float] = []
+    prev_revenue = latest_revenue
+    for t, revenue in enumerate(revenues):
+        nopat = revenue * target_ebit_margin * (1 - tax_rate)
+        depreciation = revenue * dep_ratio
+        capex = revenue * capex_pcts[t]
+        delta_nwc = (revenue - prev_revenue) * nwc_intensity
+        forecast.append(nopat + depreciation - capex - delta_nwc)
+        prev_revenue = revenue
+    return forecast
 
 
 def _wacc(market_data: dict[str, Any], tax_rate: float,
@@ -213,7 +300,8 @@ def build_dcf_inputs(statements: list[dict[str, Any]],
             "receivables/inventory/payables for a year-over-year delta)."
         )
 
-    forecast = _forecast_fcff(history, _revenue_cagr(statements))
+    terminal_growth = macro.terminal_growth(profile)
+    forecast = _forecast_fcff(statements, tax_rate, terminal_growth)
     beta_value = macro.beta_for_ticker(market_data.get("ticker"), market_data, profile)
 
     debt = market_data.get("total_debt")
@@ -229,7 +317,7 @@ def build_dcf_inputs(statements: list[dict[str, Any]],
     return DCFInputs(
         fcff_forecast=forecast,
         wacc=_wacc(market_data, tax_rate, profile, beta_value),
-        terminal_growth=macro.terminal_growth(profile),
+        terminal_growth=terminal_growth,
         net_debt=net_debt,
         shares_outstanding=float(market_data["shares"]),
         minority_interest=minority,

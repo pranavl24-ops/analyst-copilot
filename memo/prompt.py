@@ -94,6 +94,8 @@ def _valuation_block(
             "equity_value": round(valuation.equity_value, 1),
             "terminal_value_pct_of_ev": round(valuation.tv_pct_of_ev * 100, 1),
         }
+        if getattr(valuation, "implied_exit_multiple", None) is not None:
+            block["bridge"]["implied_exit_multiple"] = round(valuation.implied_exit_multiple, 2)
     if hasattr(valuation, "implied_pb"):
         block["bridge"] = {
             "book_equity": round(valuation.book_equity_0, 1),
