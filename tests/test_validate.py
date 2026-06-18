@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from core.models import Statements
-from core.validate import BrokenDataError, sanity_checks
+from core.validate import BrokenDataError, price_scale_flags, sanity_checks
 
 
 def _clean() -> Statements:
@@ -92,3 +92,23 @@ def test_non_finite_value_raises() -> None:
 def test_non_positive_market_cap_raises() -> None:
     with pytest.raises(BrokenDataError):
         sanity_checks(_clean(), market_cap=0.0)
+
+
+def test_price_scale_in_band_has_no_flags() -> None:
+    flags = price_scale_flags(
+        market_cap=1_500.0,
+        pretax_income=100.0,
+        tax_expense=25.0,
+        total_equity=500.0,
+    )
+    assert flags == []
+
+
+def test_price_scale_out_of_band_flags_inconsistent_basis() -> None:
+    flags = price_scale_flags(
+        market_cap=15_000.0,
+        pretax_income=100.0,
+        tax_expense=25.0,
+        total_equity=500.0,
+    )
+    assert any("implied P/E" in f and "inconsistent" in f for f in flags)

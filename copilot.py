@@ -28,16 +28,19 @@ import yaml
 from core.comps import CompsResult, PeerMultiples
 from core.models import Statements
 from core.ratios import RatioError, compute_ratios
-from core.validate import sanity_checks
+from core.validate import price_scale_flags, sanity_checks
 from core.valuation import assumptions as macro
 from core.valuation.fcff import (
     DCFInputs,
+    StandardFCFF,
     _historical_fcff,
     _revenue_cagr,
     run_dcf,
     sensitivity,
 )
-from core.valuation.financials import BankInputs, run_bank_excess_return
+from core.valuation.financials import BankExcessReturn, BankInputs, run_bank_excess_return
+from core.valuation.implied import implied_expectations
+from core.valuation.implied import to_payload as implied_to_payload
 from core.valuation.plausibility import (
     book_equity_distortion_warnings,
     extreme_gap_warnings,
@@ -51,6 +54,46 @@ from memo.render import football_field, render_pdf
 
 OUT_ROOT = Path("out")
 PROFILES_DIR = Path(__file__).resolve().parent / "profiles"
+
+FCFF_REQUIRED_FIELDS = ("ebit", "depreciation", "capex", "tax_expense", "pretax_income")
+BANK_REQUIRED_FIELDS = ("total_equity", "pretax_income", "tax_expense")
+
+
+def _has_working_capital(period: dict[str, Any]) -> bool:
+    if period.get("change_in_working_capital") is not None:
+        return True
+    return all(period.get(field) is not None for field in ("receivables", "inventory", "payables"))
+
+
+def _missing_fields(period: dict[str, Any], model_name: str) -> list[str]:
+    if model_name == "bank":
+        return [field for field in BANK_REQUIRED_FIELDS if period.get(field) is None]
+    missing = [field for field in FCFF_REQUIRED_FIELDS if period.get(field) is None]
+    if not _has_working_capital(period):
+        missing.append("working-capital inputs")
+    return missing
+
+
+def usable_periods(
+    statements: list[dict[str, Any]], model_name: str
+) -> tuple[list[dict[str, Any]], list[tuple[Any, str]]]:
+    """Split pulled statements into periods complete enough for the chosen model.
+
+    Returns the usable periods (order preserved) and, for each dropped period, a
+    ``(year, reason)`` pair naming the absent fields. This is the single source of
+    truth for which periods the valuation, payload, and console report all consume:
+    nothing downstream re-reads the raw unfiltered list and blindly floats fields
+    that may be ``None``.
+    """
+    usable: list[dict[str, Any]] = []
+    dropped: list[tuple[Any, str]] = []
+    for period in statements:
+        missing = _missing_fields(period, model_name)
+        if missing:
+            dropped.append((period.get("year", "?"), f"missing {', '.join(missing)}"))
+        else:
+            usable.append(period)
+    return usable, dropped
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -117,8 +160,22 @@ def _emit(ticker: str, payload: dict[str, Any],
     )
     for warning in payload["warnings"]:
         print(f"[{ticker}] warning: {warning}")
+    market_implied = payload.get("market_implied")
+    if market_implied:
+        print(f"[{ticker}] what the market is implying:")
+        for line in market_implied["lines"]:
+            print(f"[{ticker}]   {line}")
     print(f"[{ticker}] wrote {outdir}/memo.pdf, memo.md, payload.json, football_field.png")
     return 0
+
+
+def _market_implied(
+    model: Any, inputs: Any, price: float, gap_flags: list[str]
+) -> Optional[dict[str, Any]]:
+    """Solve what the price implies, but only when the extreme-gap warning fired."""
+    if not gap_flags:
+        return None
+    return implied_to_payload(implied_expectations(model, inputs, price))
 
 
 def _resolve_from_override(
@@ -181,20 +238,30 @@ def _resolve_from_statements(
         print(f"Cannot build a memo for {ticker}: no market price was available to bridge to.")
         return 1
 
+    usable, dropped = usable_periods(statements, model.name)
+    for year, reason in dropped:
+        print(f"[{ticker}] dropped FY{year}: {reason}")
+    if len(usable) < 2:
+        print(
+            f"Cannot value {ticker}: not enough complete statement periods to value "
+            f"{ticker} from pulled data; supply an override."
+        )
+        return 1
+
     try:
-        inputs = model.from_statements(statements, market, profile)
+        inputs = model.from_statements(usable, market, profile)
         result = model.value(inputs)
     except (ValueError, KeyError) as error:
         print(f"Cannot value {ticker} from statements: {error}")
         return 1
 
     if model.name == "bank":
-        return _payload_bank_from_statements(ticker, statements, market, profile, inputs, result)
-    return _payload_fcff_from_statements(ticker, pulled, statements, market, profile, inputs, result)
+        return _payload_bank_from_statements(ticker, model, usable, market, profile, inputs, result)
+    return _payload_fcff_from_statements(ticker, model, pulled, usable, market, profile, inputs, result)
 
 
 def _payload_fcff_from_statements(
-    ticker: str, pulled: dict[str, Any], statements: list[dict[str, Any]],
+    ticker: str, model: Any, pulled: dict[str, Any], statements: list[dict[str, Any]],
     market: dict[str, Any], profile: dict[str, Any], inputs: DCFInputs, result: Any,
 ) -> tuple[dict[str, Any], dict[str, tuple[float, float]]]:
     tax_rate = macro.effective_tax_rate(statements, profile)
@@ -206,7 +273,7 @@ def _payload_fcff_from_statements(
     print(f"    effective tax rate        {tax_rate:.2%}")
     print(f"    revenue CAGR              {_revenue_cagr(statements):.2%} (FCFF growth capped at 15%)")
     print(f"    historical FCFF           [{', '.join(f'{x:,.0f}' for x in history)}]")
-    print(f"    FCFF forecast (5y)        [{', '.join(f'{x:,.0f}' for x in inputs.fcff_forecast)}]")
+    print(f"    FCFF forecast ({len(inputs.fcff_forecast)}y)       [{', '.join(f'{x:,.0f}' for x in inputs.fcff_forecast)}]")
     print(f"    cost of equity (CAPM)     {ke:.2%} (beta {beta_value:.2f} vs ^NSEI)")
     print(f"    WACC                      {inputs.wacc:.2%}")
     print(f"    terminal growth           {inputs.terminal_growth:.2%}")
@@ -220,13 +287,24 @@ def _payload_fcff_from_statements(
     price = float(market["price"])
     grid = sensitivity(inputs)
     flags = unstable_fcff_warnings(history)
+    sotp_periods = [p for p in statements if p.get("revenue") is not None]
     flags += sum_of_the_parts_warnings(
         history,
-        [float(p["capex"]) for p in statements],
-        [float(p["depreciation"]) for p in statements],
-        [float(p["revenue"]) for p in statements],
+        [float(p["capex"]) for p in sotp_periods],
+        [float(p["depreciation"]) for p in sotp_periods],
+        [float(p["revenue"]) for p in sotp_periods],
     )
-    flags += extreme_gap_warnings(result.value_per_share, price)
+    gap_flags = extreme_gap_warnings(result.value_per_share, price)
+    flags += gap_flags
+    market_implied = _market_implied(model, inputs, price, gap_flags)
+    latest = statements[-1]
+    if market.get("market_cap") is not None and latest.get("total_equity") is not None:
+        flags += price_scale_flags(
+            market_cap=float(market["market_cap"]),
+            pretax_income=float(latest["pretax_income"]),
+            tax_expense=float(latest["tax_expense"]),
+            total_equity=float(latest["total_equity"]),
+        )
     ratios = _ratios_or_warning(pulled, flags)
 
     assumptions = {
@@ -250,21 +328,22 @@ def _payload_fcff_from_statements(
         comps=None,
         sensitivity=grid,
         extra_warnings=flags,
+        market_implied=market_implied,
     )
     methods = {"DCF (FCFF)": _range_from_grid(grid)}
     return payload, methods
 
 
 def _payload_bank_from_statements(
-    ticker: str, statements: list[dict[str, Any]], market: dict[str, Any],
+    ticker: str, model: Any, statements: list[dict[str, Any]], market: dict[str, Any],
     profile: dict[str, Any], inputs: BankInputs, result: Any,
 ) -> tuple[dict[str, Any], dict[str, tuple[float, float]]]:
     beta_value = macro.beta_for_ticker(market.get("ticker"), market, profile)
 
     print("  derived bank inputs:")
     print(f"    book equity (opening)     {inputs.book_equity_0:,.0f}")
-    print(f"    ROE forecast (5y)         [{', '.join(f'{x:.1%}' for x in inputs.roe_forecast)}]")
-    print(f"    BV growth forecast (5y)   [{', '.join(f'{x:.1%}' for x in inputs.bv_growth_forecast)}]")
+    print(f"    ROE forecast ({len(inputs.roe_forecast)}y)        [{', '.join(f'{x:.1%}' for x in inputs.roe_forecast)}]")
+    print(f"    BV growth forecast ({len(inputs.bv_growth_forecast)}y)  [{', '.join(f'{x:.1%}' for x in inputs.bv_growth_forecast)}]")
     print(f"    cost of equity (CAPM)     {inputs.cost_of_equity:.2%} (beta {beta_value:.2f} vs ^NSEI)")
     print(f"    terminal ROE              {inputs.terminal_roe:.2%}")
     print(f"    terminal growth           {inputs.terminal_growth:.2%}")
@@ -277,7 +356,9 @@ def _payload_bank_from_statements(
     grid = _bank_sensitivity(inputs)
     equity_series = [float(p["total_equity"]) for p in statements if p.get("total_equity") is not None]
     flags = book_equity_distortion_warnings(equity_series)
-    flags += extreme_gap_warnings(result.value_per_share, price)
+    gap_flags = extreme_gap_warnings(result.value_per_share, price)
+    flags += gap_flags
+    market_implied = _market_implied(model, inputs, price, gap_flags)
     ratios = _bank_ratios_or_warning(statements, inputs.cost_of_equity, flags)
 
     assumptions = {
@@ -302,6 +383,7 @@ def _payload_bank_from_statements(
         comps=None,
         sensitivity=grid,
         extra_warnings=flags,
+        market_implied=market_implied,
     )
     methods = {"Excess return": _range_from_grid(grid)}
     return payload, methods
@@ -352,7 +434,9 @@ def _value_fcff(ticker: str, data: dict[str, Any]) -> tuple[dict[str, Any], dict
         [float(p["depreciation"]) for p in periods],
         [float(p["revenue"]) for p in periods],
     )
-    flags += extreme_gap_warnings(result.value_per_share, float(data["price"]))
+    gap_flags = extreme_gap_warnings(result.value_per_share, float(data["price"]))
+    flags += gap_flags
+    market_implied = _market_implied(StandardFCFF(), inputs, float(data["price"]), gap_flags)
 
     cblock = data["comps"]
     assumptions = {
@@ -377,6 +461,7 @@ def _value_fcff(ticker: str, data: dict[str, Any]) -> tuple[dict[str, Any], dict
         comps=comps,
         sensitivity=grid,
         extra_warnings=flags,
+        market_implied=market_implied,
     )
     methods = {
         "DCF (FCFF)": _range_from_grid(grid),
@@ -408,7 +493,9 @@ def _value_bank(ticker: str, data: dict[str, Any]) -> tuple[dict[str, Any], dict
 
     equity_series = [float(p["total_equity"]) for p in data["statements"]]
     flags += book_equity_distortion_warnings(equity_series)
-    flags += extreme_gap_warnings(result.value_per_share, float(data["price"]))
+    gap_flags = extreme_gap_warnings(result.value_per_share, float(data["price"]))
+    flags += gap_flags
+    market_implied = _market_implied(BankExcessReturn(), inputs, float(data["price"]), gap_flags)
 
     cblock = data["comps"]
     assumptions = {
@@ -435,6 +522,7 @@ def _value_bank(ticker: str, data: dict[str, Any]) -> tuple[dict[str, Any], dict
         comps=comps,
         sensitivity=grid,
         extra_warnings=flags,
+        market_implied=market_implied,
     )
     methods = {
         "Excess return": _range_from_grid(grid),
@@ -454,7 +542,16 @@ def _validate_fcff(data: dict[str, Any]) -> list[str]:
         nwc=[float(p["receivables"]) + float(p["inventory"]) - float(p["payables"]) for p in periods],
         tax_rate=_latest_tax_rate(periods),
     )
-    return sanity_checks(statements, market_cap=float(data["market_cap"]))
+    market_cap = float(data["market_cap"])
+    flags = sanity_checks(statements, market_cap=market_cap)
+    latest = periods[-1]
+    flags += price_scale_flags(
+        market_cap=market_cap,
+        pretax_income=float(latest["pretax_income"]),
+        tax_expense=float(latest["tax_expense"]),
+        total_equity=float(latest["total_equity"]),
+    )
+    return flags
 
 
 def _validate_bank(data: dict[str, Any]) -> list[str]:

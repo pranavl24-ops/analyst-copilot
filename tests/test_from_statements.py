@@ -47,7 +47,7 @@ def _market():
 
 def test_builds_a_valuable_dcf():
     inputs = StandardFCFF().from_statements(_statements(), _market(), {})
-    assert len(inputs.fcff_forecast) == 5
+    assert len(inputs.fcff_forecast) == 10
     assert all(f > 0 for f in inputs.fcff_forecast)
     assert 0.05 <= inputs.wacc <= 0.20
     assert inputs.terminal_growth < inputs.wacc
@@ -170,8 +170,8 @@ def test_bank_from_statements_builds_inputs():
               "total_debt": None, "cash": None}
     inputs = BankExcessReturn().from_statements(_statements(), market, {})
     assert inputs.book_equity_0 == 30200.0
-    assert len(inputs.roe_forecast) == 5
-    assert len(inputs.bv_growth_forecast) == 5
+    assert len(inputs.roe_forecast) == 10
+    assert len(inputs.bv_growth_forecast) == 10
     assert inputs.roe_forecast[-1] == pytest.approx(0.15)
     assert inputs.terminal_growth < inputs.cost_of_equity
 

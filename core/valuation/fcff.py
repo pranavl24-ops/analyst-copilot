@@ -16,6 +16,27 @@ FCFF_GROWTH_CAP = 0.15
 
 
 @dataclass
+class FCFFDrivers:
+    """The component-forecast recipe behind a DCFInputs.fcff_forecast.
+
+    Carried alongside the forecast so the reverse-expectations solver can rebuild
+    it for an alternative target margin or near-term revenue growth without
+    re-reading the statements. Present only when the inputs were projected from
+    statements; an override-supplied forecast leaves it unset.
+    """
+
+    latest_revenue: float
+    revenue_cagr: float
+    target_ebit_margin: float
+    max_ebit_margin: float
+    tax_rate: float
+    dep_ratio: float
+    capex_pct_latest: float
+    nwc_intensity: float
+    years: int
+
+
+@dataclass
 class DCFInputs:
     fcff_forecast: list[float]
     wacc: float
@@ -27,6 +48,7 @@ class DCFInputs:
     investments_associates: float = 0.0
     terminal_ebitda: Optional[float] = None
     exit_multiple: Optional[float] = None
+    forecast_drivers: Optional[FCFFDrivers] = None
 
 
 @dataclass
@@ -222,18 +244,23 @@ def _nwc_intensity(statements: list[dict[str, Any]]) -> float:
     return min(max(sum(ratios) / len(ratios), 0.0), 0.25)
 
 
-def _faded_revenue_forecast(latest_revenue: float, revenue_cagr: float,
-                            terminal_growth: float, years: int) -> list[float]:
-    """Compound the latest revenue at a rate fading linearly from the (capped) CAGR
+def _revenue_path(latest_revenue: float, near_term_growth: float,
+                  terminal_growth: float, years: int) -> list[float]:
+    """Compound the latest revenue at a rate fading linearly from ``near_term_growth``
     in year 1 to ``terminal_growth`` in the final year."""
-    capped = min(revenue_cagr, FCFF_GROWTH_CAP)
     revenues: list[float] = []
     prev = latest_revenue
     for t in range(1, years + 1):
-        growth = capped + (terminal_growth - capped) * (t - 1) / (years - 1)
+        growth = near_term_growth + (terminal_growth - near_term_growth) * (t - 1) / (years - 1)
         prev = prev * (1 + growth)
         revenues.append(prev)
     return revenues
+
+
+def _faded_revenue_forecast(latest_revenue: float, revenue_cagr: float,
+                            terminal_growth: float, years: int) -> list[float]:
+    """Revenue path whose year-1 growth is the CAGR capped at ``FCFF_GROWTH_CAP``."""
+    return _revenue_path(latest_revenue, min(revenue_cagr, FCFF_GROWTH_CAP), terminal_growth, years)
 
 
 def _capex_pct_schedule(capex_pct_latest: float, dep_ratio: float, years: int) -> list[float]:
@@ -245,32 +272,58 @@ def _capex_pct_schedule(capex_pct_latest: float, dep_ratio: float, years: int) -
     ]
 
 
-def _forecast_fcff(statements: list[dict[str, Any]], tax_rate: float,
-                   terminal_growth: float) -> list[float]:
+def _extract_drivers(statements: list[dict[str, Any]], tax_rate: float) -> FCFFDrivers:
+    ebit_ratios = _ratio_to_revenue(statements, "ebit")
+    return FCFFDrivers(
+        latest_revenue=_positive_revenues(statements)[-1],
+        revenue_cagr=_revenue_cagr(statements),
+        target_ebit_margin=_last_n_mean(ebit_ratios),
+        max_ebit_margin=max(ebit_ratios),
+        tax_rate=tax_rate,
+        dep_ratio=_last_n_mean(_ratio_to_revenue(statements, "depreciation")),
+        capex_pct_latest=_ratio_to_revenue(statements, "capex", absolute=True)[-1],
+        nwc_intensity=_nwc_intensity(statements),
+        years=macro.FORECAST_YEARS,
+    )
+
+
+def base_near_term_growth(drivers: FCFFDrivers) -> float:
+    """The capped year-1 revenue growth the base-case forecast actually uses."""
+    return min(drivers.revenue_cagr, FCFF_GROWTH_CAP)
+
+
+def forecast_from_drivers(drivers: FCFFDrivers, terminal_growth: float, *,
+                          ebit_margin: Optional[float] = None,
+                          near_term_growth: Optional[float] = None) -> list[float]:
     """Component forecast: project revenue, then EBIT, NOPAT, depreciation, capex,
     and the working-capital draw separately, so a depressed or volatile historical
-    FCFF base never anchors the forecast and capex converges to maintenance levels."""
-    years = macro.FORECAST_YEARS
-    latest_revenue = _positive_revenues(statements)[-1]
+    FCFF base never anchors the forecast and capex converges to maintenance levels.
 
-    target_ebit_margin = _last_n_mean(_ratio_to_revenue(statements, "ebit"))
-    dep_ratio = _last_n_mean(_ratio_to_revenue(statements, "depreciation"))
-    capex_pct_latest = _ratio_to_revenue(statements, "capex", absolute=True)[-1]
-    nwc_intensity = _nwc_intensity(statements)
+    ``ebit_margin`` and ``near_term_growth`` default to the base-case driver values;
+    overriding either lets the reverse-expectations solver re-run the same forecast
+    under a single altered assumption.
+    """
+    margin = drivers.target_ebit_margin if ebit_margin is None else ebit_margin
+    g1 = base_near_term_growth(drivers) if near_term_growth is None else near_term_growth
 
-    revenues = _faded_revenue_forecast(latest_revenue, _revenue_cagr(statements), terminal_growth, years)
-    capex_pcts = _capex_pct_schedule(capex_pct_latest, dep_ratio, years)
+    revenues = _revenue_path(drivers.latest_revenue, g1, terminal_growth, drivers.years)
+    capex_pcts = _capex_pct_schedule(drivers.capex_pct_latest, drivers.dep_ratio, drivers.years)
 
     forecast: list[float] = []
-    prev_revenue = latest_revenue
+    prev_revenue = drivers.latest_revenue
     for t, revenue in enumerate(revenues):
-        nopat = revenue * target_ebit_margin * (1 - tax_rate)
-        depreciation = revenue * dep_ratio
+        nopat = revenue * margin * (1 - drivers.tax_rate)
+        depreciation = revenue * drivers.dep_ratio
         capex = revenue * capex_pcts[t]
-        delta_nwc = (revenue - prev_revenue) * nwc_intensity
+        delta_nwc = (revenue - prev_revenue) * drivers.nwc_intensity
         forecast.append(nopat + depreciation - capex - delta_nwc)
         prev_revenue = revenue
     return forecast
+
+
+def _forecast_fcff(statements: list[dict[str, Any]], tax_rate: float,
+                   terminal_growth: float) -> list[float]:
+    return forecast_from_drivers(_extract_drivers(statements, tax_rate), terminal_growth)
 
 
 def _wacc(market_data: dict[str, Any], tax_rate: float,
@@ -301,7 +354,8 @@ def build_dcf_inputs(statements: list[dict[str, Any]],
         )
 
     terminal_growth = macro.terminal_growth(profile)
-    forecast = _forecast_fcff(statements, tax_rate, terminal_growth)
+    drivers = _extract_drivers(statements, tax_rate)
+    forecast = forecast_from_drivers(drivers, terminal_growth)
     beta_value = macro.beta_for_ticker(market_data.get("ticker"), market_data, profile)
 
     debt = market_data.get("total_debt")
@@ -321,6 +375,7 @@ def build_dcf_inputs(statements: list[dict[str, Any]],
         net_debt=net_debt,
         shares_outstanding=float(market_data["shares"]),
         minority_interest=minority,
+        forecast_drivers=drivers,
     )
 
 

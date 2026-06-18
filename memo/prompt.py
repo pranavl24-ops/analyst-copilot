@@ -38,6 +38,7 @@ def build_payload(
     comps: Optional[CompsResult] = None,
     sensitivity: Optional[dict[tuple[float, float], Optional[float]]] = None,
     extra_warnings: Optional[list[str]] = None,
+    market_implied: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Collect computed outputs into one dict for the memo prompt.
 
@@ -68,6 +69,7 @@ def build_payload(
         "upside_pct": round(upside_pct * 100, 1),
         "comps": _comps_block(comps),
         "ratios": _ratios_block(ratios),
+        "market_implied": market_implied,
         "warnings": warnings,
     }
 
@@ -174,6 +176,10 @@ def system_prompt() -> str:
         "- If a figure is not in the payload, do not state it. Do not fill gaps.\n"
         "- Address every item in the payload's `warnings` list honestly in the Risks "
         "section — do not bury or soften them.\n"
+        "- If the payload contains a non-null `market_implied`, add a 'What the market "
+        "is implying' section after Risks. State each implied assumption factually as a "
+        "base-vs-implied contrast (you may use the pre-written `market_implied.lines` "
+        "verbatim). Never editorialise on whether the market is right.\n"
         "- Adapt your terminology to `valuation.method`. For an FCFF DCF, speak of "
         "discounted free cash flow, WACC, and terminal value. For a bank/NBFC "
         "excess-return model, speak of excess returns over the cost of equity, the "
@@ -268,9 +274,10 @@ def render_offline_memo(payload: dict[str, Any]) -> str:
         _section_assumptions(is_bank, val.get("assumptions", {}), payload.get("comps")),
         _section_sensitivity(is_bank, val.get("sensitivity")),
         _section_risks(payload.get("warnings", []), is_bank, bridge, payload.get("comps"), upside_pct),
+        _section_market_implied(payload.get("market_implied")),
         _section_close(rec, company, value_per_share, price, upside_pct),
     ]
-    return "\n\n".join(sections) + "\n"
+    return "\n\n".join(section for section in sections if section) + "\n"
 
 
 def _offline_header() -> str:
@@ -418,6 +425,19 @@ def _section_risks(
             "- The model value sits below the current price: the market is pricing in more "
             "than these assumptions support, which may persist."
         )
+    return "\n".join(body)
+
+
+def _section_market_implied(market_implied: Optional[dict[str, Any]]) -> str:
+    if not market_implied or not market_implied.get("lines"):
+        return ""
+    body = [
+        "## What the Market Is Implying\n",
+        "Holding the base-case inputs fixed, these are the single assumptions that "
+        "would each have to be true to justify the current price. Stated as fact, not "
+        "a view on whether the market is right:",
+    ]
+    body.extend(f"- {line}" for line in market_implied["lines"])
     return "\n".join(body)
 
 

@@ -13,6 +13,8 @@ from core.models import Statements
 
 MARGIN_SWING_LIMIT = 0.25
 SCALE_GAP_DECADES = 1.0
+PE_BAND = (3.0, 100.0)
+PB_BAND = (0.2, 30.0)
 
 
 class BrokenDataError(ValueError):
@@ -92,6 +94,45 @@ def _margin_swing_flags(s: Statements) -> list[str]:
                 f"({prev * 100:.0f}%) and year {year} ({curr * 100:.0f}%)"
             )
     return flags
+
+
+def price_scale_flags(
+    market_cap: float,
+    pretax_income: float,
+    tax_expense: float,
+    total_equity: float,
+) -> list[str]:
+    """Flag when the pulled price and statements look like different scales.
+
+    Computes the implied P/E (``market_cap`` over net income, where net income is
+    ``pretax_income - tax_expense``) and the implied P/B (``market_cap`` over
+    ``total_equity``) and flags either ratio that falls outside a sane band. A
+    ratio far outside its band usually means the price and the statements are
+    quoted on inconsistent bases — for instance a split applied to the price but
+    not to shares or earnings — which would silently corrupt the upside/downside
+    call. Sub-checks with a non-positive denominator carry no scale signal and are
+    skipped. This never raises; it only flags.
+    """
+    flags: list[str] = []
+    net_income = pretax_income - tax_expense
+    if net_income > 0:
+        implied_pe = market_cap / net_income
+        if not PE_BAND[0] <= implied_pe <= PE_BAND[1]:
+            flags.append(_inconsistent_basis_warning("P/E", implied_pe, PE_BAND))
+    if total_equity > 0:
+        implied_pb = market_cap / total_equity
+        if not PB_BAND[0] <= implied_pb <= PB_BAND[1]:
+            flags.append(_inconsistent_basis_warning("P/B", implied_pb, PB_BAND))
+    return flags
+
+
+def _inconsistent_basis_warning(label: str, ratio: float, band: tuple[float, float]) -> str:
+    return (
+        f"implied {label} of {ratio:,.1f}x is outside the sane band "
+        f"[{band[0]:g}, {band[1]:g}] — price and statements may be on inconsistent "
+        f"bases (e.g. a split applied to price but not to shares or earnings); "
+        f"verify against a trusted source"
+    )
 
 
 def _scale_flags(s: Statements, market_cap: float | None) -> list[str]:
