@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 out/
 .claude/settings.local.json
+*.bak
